@@ -1,0 +1,110 @@
+
+Param ( 
+    [Parameter(Mandatory=$false)]
+    [string]$SoftwareInstallation_Folder = "C:\Temp"
+) 
+
+#region Functions
+
+function Write-Log 
+{ 
+    [CmdletBinding()] 
+    [OutputType([int])] 
+    Param ( 
+        # The string to be written to the log.
+        [Parameter(Mandatory=$true, ValueFromPipelineByPropertyName=$true, Position=0)]
+        [ValidateNotNullOrEmpty()]
+        [Alias("LogContent")]
+        [string]$Message,
+ 
+        [Parameter(Mandatory=$false, ValueFromPipelineByPropertyName=$true, Position=3)]
+        [ValidateSet("Error","Warn","Info")]
+        [string]$Level="Info",
+
+        [switch]$AddEmptyLine
+    ) 
+ 
+    Begin { }
+    Process {
+        $Path = "$PSScriptRoot\ScriptLogs\JRE-Update-Operation-Log.txt"
+ 
+        # If attempting to write to a log file in a folder/path that doesn't exist to create the file include path. 
+        if (!(Test-Path $Path)) { 
+            Write-Verbose "Creating $Path."
+		    $NewLogFile = New-Item $Path -Force -ItemType File 
+        }
+
+        $Message = "$(Get-Date -Format "yyyy-MM-dd HH:mm:ss") $($Level): $Message"
+
+        # Write message to console.
+        Write-Output $Message
+
+        # Write message to file.
+        Write-Output $Message | Out-File -FilePath $Path -Append -Encoding ascii
+
+        if ($AddEmptyLine.IsPresent)
+        {
+            $Message = " "
+            Write-Output $Message | Out-File -FilePath $Path -Append -Encoding ascii
+        }
+    }
+    End { } 
+}
+
+function Install-JRE ([string]$Local_Folder)
+{
+    try
+    {
+        if (Test-Path "$Local_Folder" -PathType Container)
+        {
+            Write-Log "CHECKING IF THE JRE FILE EXISTS ...."
+            
+            $FileExists = gci "$Local_Folder" -File | ?{$_.name -like "jre-*-windows-x64.exe"}
+
+            if ($FileExists -ne $null)
+            {
+                Write-Log "JRE file EXISTS in the input folder. PROCEEDING WITH THE INSTALLATION ...."
+
+                $jre_args = "/s REBOOT=0 SPONSORS=0 AUTO_UPDATE=0"
+
+                Write-Log "Installing JRE using file $($FileExists.Name) .... "
+        
+                Start-Process -FilePath "$($FileExists.FullName)" -ArgumentList $jre_args -Wait | Out-Null
+
+                $JREVersion = gci "C:\Program Files\Java" -name | ?{ -not $_.PsIsContainer } | Sort-Object LastWriteTime -Descending | Select-Object -first 1 
+
+                if ($JREVersion)
+                {
+                    Write-Log "JRE $JREVersion installed successfully."
+
+                    $javafolder = "C:\Program Files\Java\$JREVersion"
+        
+                    Write-Log "Setting environment variable for JAVA"
+                    [Environment]::SetEnvironmentVariable("JAVA_HOME",$javafolder,"Machine")
+                    Write-Log "JAVA_HOME env variable set successfully."
+
+                   Restart-Computer -Force
+                }
+            }
+            else
+            {
+                Write-Log "No JRE file found in the Software Installation directory. Therefore, NO OPERATION TO PERFORM."
+            }
+        }
+        else
+        {
+            Write-Log "The Installation folder path [$Local_Folder] is INVALID. TERMINATING THE SCRIPT WITH ERROR." -Level Error
+        }
+    }
+    catch
+    {
+        Write-Log "JRE INSTALLATION ERROR: $_" -Level Error
+        Write-Error "$_"
+    }
+}
+
+#endregion
+
+## Install JRE and Set the folder to JAVA_HOME variable
+Install-JRE -Local_Folder "$SoftwareInstallation_Folder"
+
