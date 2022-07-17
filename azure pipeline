@@ -1,0 +1,485 @@
+.dockerignore
+
+**/bin
+
+**/obj
+
+**/.vscode
+
+**/.vs
+
+.git
+
+*.orig
+
+ 
+
+ 
+
+Dockerfile
+
+ 
+
+# syntax=docker/dockerfile:1
+
+FROMmcr.microsoft.com/dotnet/sdk:6.0 AS build-stage
+
+ 
+
+# Credentials for Telerik packages
+
+ARGTELERIK_NUGET_USERNAME
+
+ARGTELERIK_NUGET_PASSWORD
+
+ 
+
+# Credentials for Azure DevOps Arifact Feed
+
+ARGFEED_ACCESSTOKEN
+
+RUNcurl -L https://raw.githubusercontent.com/Microsoft/artifacts-credprovider/master/helpers/installcredprovider.sh | sh
+
+ENVVSS_NUGET_EXTERNAL_FEED_ENDPOINTS="{\"endpointCredentials\": [{\"endpoint\":\"https://pkgs.dev.azure.com/egen-pos/_packaging/egen-pos/nuget/v3/index.json\", \"password\":\"${FEED_ACCESSTOKEN}\"}]}"
+
+WORKDIR/app
+
+ 
+
+# Copy csproj & nuget. Config & restore packages
+
+# Separate this step from the full "copy & build" to cache nuget packages in build-stage
+
+COPY./Payments/nuget.config ./Payments/nuget.config
+
+COPY./Payments/Payments.sln ./Payments/Payments.sln
+
+COPY./Payments/CardPointeService/CardPointeService.csproj ./Payments/CardPointeService/CardPointeService.csproj
+
+COPY./Payments/CardPointeService.UnitTests/CardPointeService.UnitTests.csproj ./Payments/CardPointeService.UnitTests/CardPointeService.UnitTests.csproj
+
+COPY./Payments/Payments.Contracts/Payments.Contracts.csproj ./Payments/Payments.Contracts/Payments.Contracts.csproj
+
+COPY./Payments/Payments.Logic/Payments.Logic.csproj ./Payments/Payments.Logic/Payments.Logic.csproj
+
+COPY./Payments/Payments.Logic.RepositoryTests/Payments.Logic.RepositoryTests.csproj ./Payments/Payments.Logic.RepositoryTests/Payments.Logic.RepositoryTests.csproj
+
+COPY./Payments/Payments.Logic.UnitTests/Payments.Logic.UnitTests.csproj ./Payments/Payments.Logic.UnitTests/Payments.Logic.UnitTests.csproj
+
+COPY./Payments/Payments.WebApi/Payments.WebApi.csproj ./Payments/Payments.WebApi/Payments.WebApi.csproj
+
+RUNdotnet restore ./Payments/Payments.sln --configfile ./Payments/nuget.config
+
+ 
+
+# Copy everthing else and build
+
+COPY./ ./
+
+ 
+
+# Skip integrate tests (repository tests and BoltTerminal endpoint tests)
+
+RUNdotnet test ./Payments/Payments.sln -c Release --no-restore --filter"FullyQualifiedName!~CardPointeGateway&FullyQualifiedName!~BoltTerminal&FullyQualifiedName!~RepositoryTests&FullyQualifiedName!~CardSecure"
+
+ 
+
+ARGDOTNET_ENV=prd
+
+ENVE_DOTNET_ENV=${DOTNET_ENV}
+
+RUNchmod +x ./Payments/set_env.sh && ./Payments/set_env.sh
+
+RUNdotnet publish ./Payments/Payments.WebApi/Payments.WebApi.csproj -c Release -o out --no-cache /restore
+
+ 
+
+#package our NuGet
+
+ARGNUGET_SUFFIX
+
+RUNrm -rf NuGet
+
+RUN[ -n"$NUGET_SUFFIX"] && dotnet pack ./Payments/Payments.Contracts/Payments.Contracts.csproj -c Release --no-restore -o NuGet --version-suffix"${NUGET_SUFFIX}"|| dotnet pack ./Payments/Payments.Contracts/Payments.Contracts.csproj -c Release --no-restore -o NuGet
+
+ 
+
+# Build runtime image
+
+FROMmcr.microsoft.com/dotnet/aspnet:6.0.0-alpine3.14-amd64 as runtime-stage
+
+ 
+
+# Culture settings for Container
+
+RUNapk add --no-cache icu-libs
+
+ENVDOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false
+
+ 
+
+WORKDIR/app
+
+COPY--from=build-stage /app/out .
+
+ 
+
+EXPOSE80
+
+ENTRYPOINT["dotnet","Driverse.Payments.WebApi.dll"]
+
+ 
+
+Pipeline
+
+ 
+
+# Docker
+
+# Build and push an image to Azure Container Registry
+
+# https://docs.microsoft.com/azure/devops/pipelines/languages/docker
+
+ 
+
+trigger:
+
+  -'*'
+
+ 
+
+resources:
+
+ repositories:
+
+  -repository:seft
+
+ type:git
+
+ name:PaymentsWebApi
+
+  -repository:KATALON_REPO
+
+ name:AutoTests.Katalon
+
+ type:git
+
+ ref:refs/heads/main
+
+ 
+
+parameters:
+
+-name:IsPublishToTest
+
+ default:False
+
+ values:
+
+  -True
+
+  -False
+
+ 
+
+variables:
+
+-group:PipelineShared
+
+ # Container registry service connection established during pipeline creation
+
+-name:dockerRegistryServiceConnection
+
+ ${{ if eq( variables['Build.SourceBranchName'], 'main' ) }}:
+
+ value:'ed338e1e-7dfb-45ec-88fd-23e689857f52'
+
+ ${{ if ne( variables['Build.SourceBranchName'], 'main' ) }}:
+
+ value:'1f0a2131-22d1-4563-aaa1-c26f29180ab8'
+
+-name:dockerfilePath
+
+ value:'./src/Dockerfile'
+
+-name:tag
+
+ value:'$(Build.BuildNumber)'
+
+-name:IsPublishToTest
+
+ value:${{ parameters.IsPublishToTest }}
+
+ 
+
+ # Agent VM image name
+
+-name:vmImageName
+
+ value:'ubuntu-latest'
+
+ 
+
+stages:
+
+-stage:Build
+
+ displayName:Docker Build & Push
+
+ jobs:
+
+  -job:Build
+
+ displayName:Build
+
+ pool:
+
+ vmImage:$(vmImageName)
+
+ steps:
+
+  -task:Bash@3
+
+ displayName:Set Variables
+
+ inputs:
+
+ targetType:'inline'
+
+ script: |
+
+  echo "SourceBranchName: $(Build.SourceBranchName)";
+
+  if [[ $(Build.SourceBranchName) = 'development' && $ISPUBLISHTOTEST = 'False' ]];
+
+  then
+
+ echo '##vso[task.setvariable variable=tagSuffix]-dev';
+
+ echo '##vso[task.setvariable variable=nugetSuffix]dev$(tag)';
+
+ elif [[ $ISPUBLISHTOTEST = 'True' ]];
+
+ then
+
+ echo '##vso[task.setvariable variable=tagSuffix]-test';
+
+ echo '##vso[task.setvariable variable=nugetSuffix]test$(tag)';
+
+ elif [[ $(Build.SourceBranchName) = 'release' && $ISPUBLISHTOTEST = 'False' ]];
+
+ then
+
+ echo '##vso[task.setvariable variable=tagSuffix]-stg';
+
+ echo '##vso[task.setvariable variable=nugetSuffix]stg$(tag)';
+
+ elif [[ $(Build.SourceBranchName) = 'main' && $ISPUBLISHTOTEST = 'False' ]];
+
+ then
+
+ echo '##vso[task.setvariable variable=tagSuffix]';
+
+ echo '##vso[task.setvariable variable=nugetSuffix]prod$(tag)';
+
+ else
+
+ echo '##vso[task.setvariable variable=tagSuffix]-x';
+
+ echo '##vso[task.setvariable variable=nugetSuffix]x$(tag)';
+
+ fi
+
+ echo "Build Reason:$(Build.Reason)"
+
+  -task:Bash@3
+
+ displayName:ACR Login
+
+ condition:ne(variables['Build.SourceBranchName'], 'main')
+
+ inputs:
+
+ targetType:'inline'
+
+ script:docker login driversetestacr.azurecr.io -u DriverseTestACR -p $(DRIVERSE_DOCKER_PASSWORD)
+
+  -task:Bash@3
+
+ displayName:Production ACR Login
+
+ condition:eq(variables['Build.SourceBranchName'], 'main')
+
+ inputs:
+
+ targetType:'inline'
+
+ script:docker login driverseprdacr.azurecr.io -u DriversePrdACR -p $(DRIVERSE_PRD_DOCKER_PASSWORD)
+
+  -task:Bash@3
+
+ displayName:Build Build-Stage Docker Image
+
+ name:BuildBuildStageDockerImage
+
+ condition:ne(variables['Build.SourceBranchName'], 'main')
+
+ inputs:
+
+ targetType:'inline'
+
+ script: |
+
+  docker build \
+
+ -f ./src/Dockerfile \
+
+ --tag driversetestacr.azurecr.io/paymentswebapi:build-stage \
+
+ --target build-stage \
+
+ --cache-from driversetestacr.azurecr.io/paymentswebapi:build-stage \
+
+ --build-arg FEED_ACCESSTOKEN=$(FEED_ACCESSTOKEN) \
+
+ --build-arg NUGET_SUFFIX=$(nugetSuffix) \
+
+ ./src
+
+ ret_code=$?
+
+ if [ $ret_code != 0 ];
+
+ then
+
+ exit $ret_code;
+
+ fi
+
+ dockerBuildImageId=$(docker images --filter=reference='driversetestacr.azurecr.io/paymentswebapi:build-stage' -q)
+
+ echo "DockerImageId:$dockerBuildImageId"
+
+ echo '##vso[task.setVariable variable=dockerBuildImageId]$(echo $dockerBuildImageId)'
+
+  -task:Bash@3
+
+ displayName:Build Production Build-Stage Docker Image
+
+ name:BuildBuildStageDockerImageProduction
+
+ condition:eq(variables['Build.SourceBranchName'], 'main')
+
+ inputs:
+
+ targetType:'inline'
+
+ script: |
+
+  docker build \
+
+ -f ./src/Dockerfile \
+
+ --tag driverseprdacr.azurecr.io/paymentswebapi:build-stage \
+
+ --target build-stage \
+
+ --cache-from driverseprdacr.azurecr.io/paymentswebapi:build-stage \
+
+ --build-arg FEED_ACCESSTOKEN=$(FEED_ACCESSTOKEN) \
+
+ --build-arg NUGET_SUFFIX=$(nugetSuffix) \
+
+ ./src
+
+ ret_code=$?
+
+ if [ $ret_code != 0 ];
+
+ then
+
+ exit $ret_code;
+
+ fi
+
+ dockerBuildImageId=$(docker images --filter=reference='driverseprdacr.azurecr.io/paymentswebapi:build-stage' -q)
+
+ echo "DockerImageId:$dockerBuildImageId"
+
+ echo '##vso[task.setVariable variable=dockerBuildImageId]$(echo $dockerBuildImageId)'
+
+  -task:Bash@3
+
+ displayName:Push Build-Stage Docker Image
+
+ condition:and(succeeded(), or(in(variables['Build.SourceBranchName'], 'development'), eq('${{ parameters.IsPublishToTest }}', 'True'), startsWith(variables['Build.SourceBranchName'], 'Release')))
+
+ inputs:
+
+ targetType:'inline'
+
+ script:'docker push driversetestacr.azurecr.io/paymentswebapi:build-stage'
+
+  -task:Bash@3
+
+ displayName:Push Production Build-Stage Docker Image
+
+ condition:and(succeeded(), eq(variables['Build.SourceBranchName'], 'main'), eq('${{ parameters.IsPublishToTest }}', 'False'))
+
+ inputs:
+
+ targetType:'inline'
+
+ script:'docker push driverseprdacr.azurecr.io/paymentswebapi:build-stage'
+
+  -task:Bash@3
+
+ displayName:Extract NuGet package from Buid-Stage Docker Image
+
+ name:ExtractNuGetPackageFromBuildStageDockerImage
+
+ condition:and(succeeded(), or(in(variables['Build.SourceBranchName'], 'development'), eq('${{ parameters.IsPublishToTest }}', 'True'), startsWith(variables['Build.SourceBranchName'], 'Release')))
+
+ inputs:
+
+ targetType:'inline'
+
+ script: |
+
+  docker create --name dummy driversetestacr.azurecr.io/paymentswebapi:build-stage
+
+  docker cp dummy:app/NuGet $(Build.ArtifactStagingDirectory)
+
+  docker rm -f dummy
+
+  -task:Bash@3
+
+ displayName:Extract Production NuGet package from Buid-Stage Docker Image
+
+ name:ExtractNuGetPackageFromBuildStageDockerImageProduction
+
+ condition:and(succeeded(), eq(variables['Build.SourceBranchName'], 'main'), eq('${{ parameters.IsPublishToTest }}', 'False'))
+
+ inputs:
+
+ targetType:'inline'
+
+ script: |
+
+  docker create --name dummy driverseprdacr.azurecr.io/paymentswebapi:build-stage
+
+  docker cp dummy:app/NuGet $(Build.ArtifactStagingDirectory)
+
+  docker rm -f dummy
+
+  -task:Bash@3
+
+ displayName:Build Runtime-Stage Docker Image
+
+ condition:and(succeeded(), or(in(variables['Build.SourceBranchName'], 'development'), eq('${{ parameters.IsPublishToTest }}', 'True'), startsWith(variables['Build.SourceBranchName'], 'Release')))
+
+ inputs:
+
+ targetType:'inline'
+
+...
